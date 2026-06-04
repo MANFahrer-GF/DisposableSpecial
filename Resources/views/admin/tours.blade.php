@@ -110,7 +110,6 @@
           <button class="btn btn-warning pl-1 mb-1" type="submit" name="button_activate" value="deactivate_all">De-Activate Legs</button>
           <button class="btn btn-success pl-1 mb-1" type="submit" name="button_own" value="own_all">Set Ownership</button>
           <button class="btn btn-warning pl-1 mb-1" type="submit" name="button_own" value="drop_all">Drop Ownership</button>
-          <button class="btn btn-danger pl-1 mb-1" type="submit" name="button_normalize" value="normalize_all" onclick="return confirm('Are you really sure ?\n !!! LEGS WILL BECOME NORMAL FLIGHTS !!!\nThis action is irreversible !!!')">Normalize Legs</button>
         </form>
         <table class="table table-sm table-striped text-left mt-2 mb-0">
           <tr>

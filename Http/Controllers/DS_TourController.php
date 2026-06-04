@@ -411,8 +411,6 @@ class DS_TourController extends Controller
             $action = 'activate';
         } elseif ($request->button_activate === 'deactivate_all') {
             $action = 'deactivate';
-        } elseif ($request->button_normalize === 'normalize_all') {
-            $action = 'normalize';
         } elseif ($request->button_export === 'export_legs') {
             $action = 'export';
         } else {
@@ -436,22 +434,6 @@ class DS_TourController extends Controller
 
         if ($action === 'own' || $action === 'drop') {
             $this->LegOwnership($action, $tour);
-        }
-
-        if ($action === 'normalize') {
-            // Remove ownership and tour code, make legs active and visible. They will be regular/scheduled flights.
-            $normalized = $tour->legs()->update([
-                'route_code' => null,
-                'owner_type' => null,
-                'owner_id'   => null,
-                'start_date' => null,
-                'end_date'   => null,
-                'notes'      => 'Was a part of '.$tour->tour_name.' ('.$tour->tour_code.'), normalized on '.Carbon::now()->format('Y-m-d'),
-                'active'     => 1,
-                'visible'    => 1,
-            ]);
-            Log::debug('Disposable Special | '.$normalized.' legs of '.$tour->tour_code.' normalized');
-            flash()->info($tour->tour_code.' legs normalized, ownership and tour code removed.');
         }
 
         if ($action === 'export') {

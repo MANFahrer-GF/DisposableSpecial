@@ -23,310 +23,364 @@ use Illuminate\Support\Facades\Log;
 
 class DS_FreeFlightController extends Controller
 {
-    public function index()
-    {
-        if (DS_Setting('dspecial.freeflights_main', false) === false) {
-            flash()->error('Web based Free Flights are disabled... Please select a flight from schedule');
+   public function index()
+   {
+      // DisposableSpecial settings (einmalig lesen)
+      $ds_freeflights_main = (bool) DS_Setting('dspecial.freeflights_main', false);
+      if ($ds_freeflights_main === false) {
+         flash()->error('Web based Free Flights are disabled... Please select a flight from schedule');
+         return redirect('/flights');
+      }
 
-            return redirect('/flights');
-        }
+      $ds_req_balance_amount = (int) DS_Setting('dspecial.freeflights_reqbalance', 0);
+      $ds_cost_per_edit_amount = (int) DS_Setting('dspecial.freeflights_costperedit', 0);
+      $ds_company_fleet = (bool) DS_Setting('dspecial.freeflights_companyfleet', false);
 
-        if (DS_Setting('dspecial.freeflights_reqbalance', 0) > 0) {
-            $ff_finance = true;
-            $ff_balance = Money::createFromAmount(DS_Setting('dspecial.freeflights_reqbalance', 0));
-            $ff_cost = Money::createFromAmount(DS_Setting('dspecial.freeflights_costperedit', 0));
-        } else {
-            $ff_finance = false;
-        }
+      $ff_finance = false;
+      $ff_balance = null;
+      $ff_cost = null;
 
-        $settings = [];
-        $settings['ac_rank'] = setting('pireps.restrict_aircraft_to_rank', true);
-        $settings['ac_rating'] = setting('pireps.restrict_aircraft_to_typerating', false);
-        $settings['bid_block'] = setting('bids.block_aircraft', false);
-        $settings['sb_block'] = setting('simbrief.block_aircraft', false);
-        $settings['sb_callsign'] = setting('simbrief.callsign', false);
-        $settings['pilot_company'] = setting('pilots.restrict_to_company', false);
-        $settings['pilot_location'] = setting('pilots.only_flights_from_current', false);
-        $settings['airline_fleet'] = DS_Setting('dspecial.freeflights_companyfleet', false);
-        $units = ['fuel' => setting('units.fuel')];
+      if ($ds_req_balance_amount > 0) {
+         $ff_finance = true;
+         $ff_balance = Money::createFromAmount($ds_req_balance_amount);
+         $ff_cost = Money::createFromAmount($ds_cost_per_edit_amount);
+      }
 
-        // Get User and Allowed Subfleets
-        $eager_user = ['airline', 'last_pirep', 'rank', 'journal'];
+      // App settings (einmalig lesen)
+      $settings = [
+         'ac_rank'        => setting('pireps.restrict_aircraft_to_rank', true),
+         'ac_rating'      => setting('pireps.restrict_aircraft_to_typerating', false),
+         'bid_block'      => setting('bids.block_aircraft', false),
+         'sb_block'       => setting('simbrief.block_aircraft', false),
+         'sb_callsign'    => setting('simbrief.callsign', false),
+         'pilot_company'  => setting('pilots.restrict_to_company', false),
+         'pilot_location' => setting('pilots.only_flights_from_current', false),
+         'airline_fleet'  => $ds_company_fleet,
+      ];
 
-        $user = User::with($eager_user)->find(Auth::id());
+      $units = ['fuel' => setting('units.fuel')];
 
-        // Check settings for financial settings (requirement, balance)
-        if ($ff_finance && $user->journal->balance < $ff_balance) {
-            flash()->error('Not enough balance to perform a free flight. '.$ff_balance.' is required to proceed! Please select a flight from schedule...');
+      // User laden
+      $userId = Auth::id();
+      $eager_user = ['airline', 'last_pirep', 'rank', 'journal'];
 
-            return redirect('/flights');
-        }
+      /** @var \App\Models\User|null $user */
+      $user = User::with($eager_user)->find($userId);
 
-        $user_loc = optional($user)->curr_airport_id ?? optional($user)->home_airport_id;
+      if (!$user) {
+         flash()->error('User not found.');
+         return redirect('/flights');
+      }
 
-        $al_where = [];
-        $al_where['active'] = 1;
+      // Finance check
+      if ($ff_finance && $user->journal && $user->journal->balance < $ff_balance) {
+         flash()->error('Not enough balance to perform a free flight. '.$ff_balance.' is required to proceed! Please select a flight from schedule...');
+         return redirect('/flights');
+      }
 
-        $sf_where = [];
-        $allowed_sf = [];
+      $user_loc = $user->curr_airport_id ?? $user->home_airport_id;
 
-        if ($settings['ac_rank'] || $settings['ac_rating']) {
-            $userSvc = app(UserService::class);
-            $restricted_to = $userSvc->getAllowableSubfleets($user);
-            $allowed_sf = $restricted_to->pluck('id')->toArray();
-        }
+      // Airline-Filter
+      $al_where = ['active' => 1];
 
-        if ($settings['pilot_company']) {
-            $al_where['id'] = $user->airline_id;
-            $sf_where['airline_id'] = $user->airline_id;
+      // Allowed Subfleets berechnen
+      $allowed_sf = [];
 
-            $airline_sf = Subfleet::where($sf_where)->pluck('id')->toArray();
-            $allowed_sf = filled($allowed_sf) ? array_intersect($allowed_sf, $airline_sf) : $airline_sf;
-        }
+      if ($settings['ac_rank'] || $settings['ac_rating']) {
+         $userSvc = app(UserService::class);
+         $restricted_to = $userSvc->getAllowableSubfleets($user);
+         $allowed_sf = $restricted_to->pluck('id')->toArray();
+      }
 
-        // Get Airlines
-        $airlines = Airline::where($al_where)->orderby('name')->get();
+      if ($settings['pilot_company']) {
+         $al_where['id'] = $user->airline_id;
 
-        // Prepare Airline ICAO Codes array (for JavaScript / Select2)
-        $icao_list = [];
-        foreach ($airlines as $airline) {
-            $icao_list[$airline->id] = $airline->icao;
-            $fleet_list[$airline->id] = Subfleet::where('airline_id', $airline->id)->pluck('id')->toArray();
-        }
+         $airline_sf = Subfleet::where('airline_id', $user->airline_id)->pluck('id')->toArray();
+         $allowed_sf = filled($allowed_sf) ? array_values(array_intersect($allowed_sf, $airline_sf)) : $airline_sf;
+      }
 
-        // Get Available Aircraft
-        $ac_where = [];
-        $ac_where['state'] = AircraftState::PARKED;
-        $ac_where['status'] = AircraftStatus::ACTIVE;
+      // Airlines laden
+      $airlines = Airline::where($al_where)->orderBy('name')->get();
 
-        if ($user_loc && $settings['pilot_location']) {
-            $ac_where['airport_id'] = $user_loc;
-        }
+      // Subfleets in EINER Query laden (statt N+1 im Loop)
+      $fleet_list = [];
+      if ($airlines->isNotEmpty()) {
+         $subfleetIdsByAirline = Subfleet::query()
+            ->whereIn('airline_id', $airlines->pluck('id'))
+            ->whereNull('deleted_at')
+            ->get(['id', 'airline_id'])
+            ->groupBy('airline_id')
+            ->map(fn($rows) => $rows->pluck('id')->values()->all());
 
-        $withCount = [
-            'bid',
-            'simbriefs' => function ($query) { $query->whereNull('pirep_id'); },
-        ];
+         foreach ($airlines as $airline) {
+            $fleet_list[$airline->id] = $subfleetIdsByAirline[$airline->id] ?? [];
+         }
+      }
 
-        $aircraft = Aircraft::withCount($withCount)->with('airline')
-            ->where($ac_where)
-            ->when($settings['ac_rank'] || $settings['ac_rating'] || $settings['pilot_company'], function ($query) use ($allowed_sf) {
-                return $query->whereIn('subfleet_id', $allowed_sf);
-            })
-            ->when($settings['sb_block'], function ($query) {
-                return $query->having('simbriefs_count', 0);
-            })
-            ->when($settings['bid_block'], function ($query) {
-                return $query->having('bid_count', 0);
-            })->orderby('icao')->orderby('registration')
-            ->get();
+      // ICAO Liste für JS
+      $icao_list = [];
+      foreach ($airlines as $airline) {
+         $icao_list[$airline->id] = $airline->icao;
+      }
 
-        // Prepare Main Aircraft array (for JavaScript / Select2 Dropdown)
-        if ($aircraft) {
-            $select2data = [];
-            $select2data[] = ['id' => 0, 'text' => __('DSpecial::common.selectac')];
-            foreach ($aircraft as $ac) {
-                $text = $ac->airline->icao.' | '.$ac->ident;
+      // Aircraft Query
+      $ac_where = [
+         'state'  => AircraftState::PARKED,
+         'status' => AircraftStatus::ACTIVE,
+      ];
 
-                if ($ac->registration != $ac->name) {
-                    $text = $text.' '.$ac->name;
-                }
+      if ($user_loc && $settings['pilot_location']) {
+         $ac_where['airport_id'] = $user_loc;
+      }
 
-                if ($ac->fuel_onboard[$units['fuel']] > 0) {
-                    $text = $text.' | '.__('DSpecial::common.fuelob').': '.DS_ConvertWeight($ac->fuel_onboard, $units['fuel']);
-                }
+      $withCount = [
+         'bid',
+         'simbriefs' => function ($query) { $query->whereNull('pirep_id'); },
+      ];
 
-                $select2data[] = ['id' => $ac->id, 'text' => $text];
+      $aircraft = Aircraft::withCount($withCount)
+         ->with('airline')
+         ->where($ac_where)
+         ->when(
+            $settings['ac_rank'] || $settings['ac_rating'] || $settings['pilot_company'],
+            function ($query) use ($allowed_sf) {
+               // Falls allowed_sf leer ist, liefert whereIn([], ...) sonst gar nichts
+               // Das ist meist korrekt (keine erlaubten Subfleets => keine Aircraft).
+               return $query->whereIn('subfleet_id', $allowed_sf);
             }
-        }
+         )
+         ->when($settings['sb_block'], function ($query) {
+            return $query->having('simbriefs_count', 0);
+         })
+         ->when($settings['bid_block'], function ($query) {
+            return $query->having('bid_count', 0);
+         })
+         ->orderBy('icao')
+         ->orderBy('registration')
+         ->get();
 
-        // Prepare Airline > Aircraft arrays (for JavaScript / Select2 Dropdown)
-        if ($settings['airline_fleet']) {
-            foreach ($airlines as $airline) {
-                $list_aircraft = $aircraft->whereIn('subfleet_id', $fleet_list[$airline->id]);
-                $airline_fleet[$airline->icao][] = ['id' => 0, 'text' => __('DSpecial::common.selectac')];
-                foreach ($list_aircraft as $ac) {
-                    $text = $ac->airline->icao.' | '.$ac->ident;
+      // Select2: Gesamtliste
+      $select2data = [];
+      $select2data[] = ['id' => 0, 'text' => __('DSpecial::common.selectac')];
 
-                    if ($ac->registration != $ac->name) {
-                        $text = $text.' '.$ac->name;
-                    }
+      foreach ($aircraft as $ac) {
+         $text = $ac->airline->icao.' | '.$ac->ident;
 
-                    if ($ac->fuel_onboard[$units['fuel']] > 0) {
-                        $text = $text.' | '.__('DSpecial::common.fuelob').': '.DS_ConvertWeight($ac->fuel_onboard, $units['fuel']);
-                    }
+         if ($ac->registration != $ac->name) {
+            $text .= ' '.$ac->name;
+         }
 
-                    $airline_fleet[$airline->icao][] = ['id' => $ac->id, 'text' => $text];
-                }
+         if ($ac->fuel_onboard[$units['fuel']] > 0) {
+            $text .= ' | '.__('DSpecial::common.fuelob').': '.DS_ConvertWeight($ac->fuel_onboard, $units['fuel']);
+         }
+
+         $select2data[] = ['id' => $ac->id, 'text' => $text];
+      }
+
+      // Select2: Airline -> Aircraft (optional)
+      $airline_fleet = null;
+
+      if ($settings['airline_fleet']) {
+         $aircraftBySubfleet = $aircraft->groupBy('subfleet_id');
+         $airline_fleet = [];
+
+         foreach ($airlines as $airline) {
+            $airline_fleet[$airline->icao] = [];
+            $airline_fleet[$airline->icao][] = ['id' => 0, 'text' => __('DSpecial::common.selectac')];
+
+            $subfleetIds = $fleet_list[$airline->id] ?? [];
+            foreach ($subfleetIds as $subfleetId) {
+               foreach (($aircraftBySubfleet[$subfleetId] ?? collect()) as $ac) {
+                  $text = $ac->airline->icao.' | '.$ac->ident;
+
+                  if ($ac->registration != $ac->name) {
+                     $text .= ' '.$ac->name;
+                  }
+
+                  if ($ac->fuel_onboard[$units['fuel']] > 0) {
+                     $text .= ' | '.__('DSpecial::common.fuelob').': '.DS_ConvertWeight($ac->fuel_onboard, $units['fuel']);
+                  }
+
+                  $airline_fleet[$airline->icao][] = ['id' => $ac->id, 'text' => $text];
+               }
             }
-        }
+         }
+      }
 
-        $fflight = Flight::firstOrCreate(
-            [
-                'route_code'  => 'PF',
-                'user_id'     => $user->id,
-            ],
-            [
-                'airline_id'     => $user->airline_id,
-                'flight_number'  => $user->id,
-                'flight_type'    => 'E',
-                'route_code'     => 'PF',
-                'user_id'        => $user->id,
-                'notes'          => $user->ident.' - '.$user->name_private,
-                'dpt_airport_id' => $user_loc ?? 'ZZZZ',
-                'arr_airport_id' => $user->home_airport_id ?? 'ZZZZ',
-                'level'          => null,
-                'distance'       => null,
-                'route'          => null,
-                'days'           => null,
-                'active'         => 0,
-                'visible'        => 0,
-            ]
-        );
+      // Personal Flight
+      $fflight = Flight::firstOrCreate(
+         [
+            'route_code' => 'PF',
+            'user_id'    => $user->id,
+         ],
+         [
+            'airline_id'     => $user->airline_id,
+            'flight_number'  => $user->id,
+            'flight_type'    => 'E',
+            'route_code'     => 'PF',
+            'user_id'        => $user->id,
+            'notes'          => $user->ident.' - '.$user->name_private,
+            'dpt_airport_id' => $user_loc ?? 'ZZZZ',
+            'arr_airport_id' => $user->home_airport_id ?? 'ZZZZ',
+            'level'          => null,
+            'distance'       => null,
+            'route'          => null,
+            'days'           => null,
+            'active'         => 0,
+            'visible'        => 0,
+         ]
+      );
 
-        return view('DSpecial::freeflights.index', [
-            'aircraft'     => $aircraft,
-            'airlines'     => $airlines,
-            'icao'         => isset($icao_list) ? json_encode($icao_list) : null,
-            'ff_balance'   => isset($ff_balance) ? $ff_balance : null,
-            'ff_cost'      => isset($ff_cost) ? $ff_cost : null,
-            'fflight'      => $fflight,
-            'fleet_full'   => isset($select2data) ? json_encode($select2data) : null,
-            'fleet_comp'   => isset($airline_fleet) ? $airline_fleet : null,
-            'flight_types' => FlightType::select(true),
-            'settings'     => $settings,
-            'units'        => ['fuel' => setting('units.fuel')],
-            'user'         => $user,
-        ]);
-    }
+      return view('DSpecial::freeflights.index', [
+         'aircraft'     => $aircraft,
+         'airlines'     => $airlines,
+         'icao'         => json_encode($icao_list),
+         'ff_balance'   => $ff_balance,
+         'ff_cost'      => $ff_cost,
+         'fflight'      => $fflight,
+         'fleet_full'   => json_encode($select2data),
+         'fleet_comp'   => $airline_fleet,
+         'flight_types' => FlightType::select(true),
+         'settings'     => $settings,
+         'units'        => ['fuel' => $units['fuel']],
+         'user'         => $user,
+      ]);
+   }
 
-    public function store(Request $request)
-    {
-        // Check mandatory form fields
-        if (strlen(trim($request->ff_orig)) != 4 || strlen(trim($request->ff_dest)) != 4) {
-            flash()->error('Check Airport Inputs !');
+   public function store(Request $request)
+   {
+      // Mandatory fields check (minimal-invasiv, wie original)
+      if (strlen(trim((string) $request->ff_orig)) !== 4 || strlen(trim((string) $request->ff_dest)) !== 4) {
+         flash()->error('Check Airport Inputs !');
+         return redirect(route('DSpecial.freeflight'));
+      }
 
-            return redirect(route('DSpecial.freeflight'));
-        }
+      if (strlen(trim((string) $request->ff_number)) === 0) {
+         flash()->error('Check Flight Number !');
+         return redirect(route('DSpecial.freeflight'));
+      }
 
-        if (strlen(trim($request->ff_number)) === 0) {
-            flash()->error('Check Flight Number !');
+      // Finance setting
+      $ds_cost_per_edit_amount = (int) DS_Setting('dspecial.freeflights_costperedit', 0);
+      $ff_finance = false;
+      $ff_cost = null;
 
-            return redirect(route('DSpecial.freeflight'));
-        }
+      if ($ds_cost_per_edit_amount > 0) {
+         $ff_finance = true;
+         $ff_cost = Money::createFromAmount($ds_cost_per_edit_amount);
+      }
 
-        // Check settings for financial settings (cost, charge)
-        if (DS_Setting('dspecial.freeflights_costperedit', 0) > 0) {
-            $ff_finance = true;
-            $ff_cost = Money::createFromAmount(DS_Setting('dspecial.freeflights_costperedit', 0));
-        } else {
-            $ff_finance = false;
-        }
+      // Airports lookup
+      $airportSvc = app(AirportService::class);
+      $orig = $airportSvc->lookupAirportIfNotFound(trim((string) $request->ff_orig));
+      $dest = $airportSvc->lookupAirportIfNotFound(trim((string) $request->ff_dest));
 
-        // Lookup for airports, add if necessary, return back if not found
-        $airportSvc = app(AirportService::class);
-        $orig = $airportSvc->lookupAirportIfNotFound(trim($request->ff_orig));
-        $dest = $airportSvc->lookupAirportIfNotFound(trim($request->ff_dest));
+      if (!$orig || !$dest) {
+         flash()->error('Airport NOT found !!! Check ICAO codes and try again... Free Flight NOT Saved');
+         return redirect(route('DSpecial.freeflight'));
+      }
 
-        if (!$orig || !$dest) {
-            flash()->error('Airport NOT found !!! Check ICAO codes and try again... Free Flight NOT Saved');
+      // Update personal flight
+      $dist = DS_CalculateDistance($orig->icao, $dest->icao);
 
-            return redirect(route('DSpecial.freeflight'));
-        }
+      $freeflight = Flight::where('id', $request->ff_id)->first();
+      if (!$freeflight) {
+         flash()->error('Flight not found. Free Flight NOT Saved');
+         return redirect(route('DSpecial.freeflight'));
+      }
 
-        // Save updated personal flight, create the bid and redirect to flight planning
-        $dist = DS_CalculateDistance($orig->icao, $dest->icao);
+      $freeflight->airline_id = $request->ff_airlineid;
+      $freeflight->flight_number = trim((string) $request->ff_number);
+      $freeflight->callsign = !empty($request->ff_callsign) ? trim((string) $request->ff_callsign) : null;
+      $freeflight->route_code = 'PF';
+      $freeflight->dpt_airport_id = $orig->icao;
+      $freeflight->arr_airport_id = $dest->icao;
+      $freeflight->distance = $dist;
+      $freeflight->flight_time = DS_CalculateBlockTime($dist);
+      $freeflight->days = null;
+      $freeflight->route = null;
+      $freeflight->flight_type = !empty($request->ff_iatatype) ? trim((string) $request->ff_iatatype) : 'E';
+      $freeflight->notes = !empty($request->ff_owner) ? (string) $request->ff_owner : null;
+      $freeflight->user_id = $request->user_id;
+      $freeflight->active = 0;
+      $freeflight->visible = 0;
 
-        $freeflight = Flight::where('id', $request->ff_id)->first();
+      // Adjust load factor & variance by flight type
+      if (in_array($freeflight->flight_type, ['I', 'K', 'P', 'T'], true)) {
+         $freeflight->load_factor = 0;
+         $freeflight->load_factor_variance = 0;
+      } else {
+         $freeflight->load_factor = null;
+         $freeflight->load_factor_variance = null;
+      }
 
-        $freeflight->airline_id = $request->ff_airlineid;
-        $freeflight->flight_number = trim($request->ff_number);
-        $freeflight->callsign = !empty($request->ff_callsign) ? trim($request->ff_callsign) : null;
-        $freeflight->route_code = 'PF';
-        $freeflight->dpt_airport_id = $orig->icao;
-        $freeflight->arr_airport_id = $dest->icao;
-        $freeflight->distance = $dist;
-        $freeflight->flight_time = DS_CalculateBlockTime($dist);
-        $freeflight->days = null;
-        $freeflight->route = null;
-        $freeflight->flight_type = !empty($request->ff_iatatype) ? trim($request->ff_iatatype) : 'E';
-        $freeflight->notes = !empty($request->ff_owner) ? $request->ff_owner : null;
-        $freeflight->user_id = $request->user_id;
-        $freeflight->active = 0;
-        $freeflight->visible = 0;
+      $freeflight->save();
 
-        // Check Flight Type and adjust load factor & variance
-        if (in_array($freeflight->flight_type, ['I', 'K', 'P', 'T'])) {
-            $freeflight->load_factor = 0;
-            $freeflight->load_factor_variance = 0;
-        } else {
-            $freeflight->load_factor = null;
-            $freeflight->load_factor_variance = null;
-        }
+      // Bid
+      Bid::firstOrCreate(
+         [
+            'user_id'   => $request->user_id,
+            'flight_id' => $request->ff_id,
+         ],
+         [
+            'user_id'     => $request->user_id,
+            'flight_id'   => $request->ff_id,
+            'aircraft_id' => !empty($request->ff_aircraft) ? $request->ff_aircraft : null,
+         ]
+      );
 
-        $freeflight->save();
-
-        Bid::firstorCreate(
-            [
-                'user_id'   => $request->user_id,
-                'flight_id' => $request->ff_id,
-            ],
-            [
-                'user_id'     => $request->user_id,
-                'flight_id'   => $request->ff_id,
-                'aircraft_id' => !empty($request->ff_aircraft) ? $request->ff_aircraft : null,
-            ]
-        );
-
-        if ($ff_finance) {
-            $user = User::with('airline', 'journal')->find(Auth::id());
+      if ($ff_finance) {
+         $user = User::with('airline', 'journal')->find(Auth::id());
+         if ($user && $user->journal) {
             $memo = 'FreeFlight '.$freeflight->dpt_airport_id.'-'.$freeflight->arr_airport_id.' '.Carbon::now()->format('ymdHi');
             $this->ChargeForFreeFlight($user, $ff_cost, $memo);
             flash()->success('Transaction Completed... Personal Flight Updated & Bid Inserted');
-        } else {
-            flash()->success('Personal Flight Updated & Bid Inserted');
-        }
+         } else {
+            flash()->warning('Personal Flight Updated & Bid Inserted (User/Journal missing for charge)');
+         }
+      } else {
+         flash()->success('Personal Flight Updated & Bid Inserted');
+      }
 
-        // Check if SimBrief is enabled and redirect to planning form or to bids page
-        if (!empty(setting('simbrief.api_key'))) {
-            $sblink = '?flight_id='.$request->ff_id;
-            if ($request->ff_aircraft != '0') {
-                $sblink .= '&aircraft_id='.$request->ff_aircraft;
-            }
+      // SimBrief redirect
+      if (!empty(setting('simbrief.api_key'))) {
+         $sblink = '?flight_id='.$request->ff_id;
+         if ((string) $request->ff_aircraft !== '0') {
+            $sblink .= '&aircraft_id='.$request->ff_aircraft;
+         }
 
-            return redirect(route('frontend.simbrief.generate').$sblink);
-        } else {
-            return redirect(route('frontend.flights.bids'));
-        }
-    }
+         return redirect(route('frontend.simbrief.generate').$sblink);
+      }
 
-    public function ChargeForFreeFlight($user, $amount, $memo)
-    {
-        $financeSvc = app(FinanceService::class);
+      return redirect(route('frontend.flights.bids'));
+   }
 
-        // Charge User
-        $financeSvc->debitFromJournal(
-            $user->journal,
-            $amount,
-            $user,
-            $memo,
-            'FreeFlight Fees',
-            'freeflight',
-            Carbon::now()->format('Y-m-d')
-        );
+   public function ChargeForFreeFlight($user, $amount, $memo)
+   {
+      $financeSvc = app(FinanceService::class);
 
-        // Credit Airline
-        $financeSvc->creditToJournal(
-            $user->airline->journal,
-            $amount,
-            $user,
-            $memo.' UserID:'.$user->id,
-            'FreeFlight Fees',
-            'freeflight',
-            Carbon::now()->format('Y-m-d')
-        );
+      // Charge User
+      $financeSvc->debitFromJournal(
+         $user->journal,
+         $amount,
+         $user,
+         $memo,
+         'FreeFlight Fees',
+         'freeflight',
+         Carbon::now()->format('Y-m-d')
+      );
 
-        // Note Transaction
-        Log::debug('Disposable Special | UserID:'.$user->id.' Name:'.$user->name_private.' charged for FreeFlight '.$memo);
-    }
+      // Credit Airline
+      $financeSvc->creditToJournal(
+         $user->airline->journal,
+         $amount,
+         $user,
+         $memo.' UserID:'.$user->id,
+         'FreeFlight Fees',
+         'freeflight',
+         Carbon::now()->format('Y-m-d')
+      );
+
+      Log::debug('Disposable Special | UserID:'.$user->id.' Name:'.$user->name_private.' charged for FreeFlight '.$memo);
+   }
 }
