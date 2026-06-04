@@ -384,9 +384,13 @@ class DS_FreeFlightController extends Controller
          flash()->success('Personal Flight Updated & Bid Inserted');
       }
 
-      // SimBrief redirect
+      // SimBrief redirect — WICHTIG: die OFP muss an die flight_id des tatsächlich
+      // gespeicherten Freiflugs gehen ($freeflight->id), NICHT an $request->ff_id
+      // aus dem Formular. Falls store() oben einen NEUEN Datensatz angelegt hat
+      // (alter Entwurf hatte schon PIREP/OFP), wäre die ID sonst verschieden →
+      // Bid an neuer ID, OFP an alter ID = vertauscht. Genau das vermeiden wir.
       if (!empty(setting('simbrief.api_key'))) {
-         $sblink = '?flight_id='.$request->ff_id;
+         $sblink = '?flight_id='.$freeflight->id;
          if ((string) $request->ff_aircraft !== '0') {
             $sblink .= '&aircraft_id='.$request->ff_aircraft;
          }
