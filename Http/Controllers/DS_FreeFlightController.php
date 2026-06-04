@@ -10,6 +10,7 @@ use App\Models\Enums\AircraftState;
 use App\Models\Enums\AircraftStatus;
 use App\Models\Enums\FlightType;
 use App\Models\Flight;
+use App\Models\Pirep;
 use App\Models\Subfleet;
 use App\Models\User;
 use App\Services\AirportService;
@@ -207,13 +208,30 @@ class DS_FreeFlightController extends Controller
          }
       }
 
-      // Personal Flight
-      $fflight = Flight::firstOrCreate(
-         [
-            'route_code' => 'PF',
-            'user_id'    => $user->id,
-         ],
-         [
+      // Personal Flight — GSG-Fix: pro Freiflug ein EIGENER Flight-Datensatz
+      // (eigene flight_id). PaxStudio & Co. ordnen OFP/PIREP/Flugzeug über die
+      // flight_id zu. Bisher wurde EIN PF-Satz pro Pilot wiederverwendet und
+      // überschrieben → alle Freiflüge teilten sich dieselbe flight_id → OFPs
+      // und PIREPs wurden vertauscht. Lösung: wir nehmen einen noch NICHT
+      // geflogenen Freiflug-Entwurf (PF, ohne PIREP) als editierbare Vorlage;
+      // sobald der letzte Freiflug geflogen ist (hat einen PIREP), entsteht
+      // beim nächsten Mal automatisch ein NEUER Datensatz mit eigener flight_id.
+      // flight_ids, die dieser Pilot bereits geflogen hat (= haben einen PIREP).
+      // Solche PF-Sätze sind „verbraucht" und dürfen nicht überschrieben werden.
+      // (Flight hat keine pireps()-Relation → manueller Lookup über Pirep.)
+      $flownFlightIds = Pirep::where('user_id', $user->id)
+         ->whereNotNull('flight_id')
+         ->pluck('flight_id')
+         ->all();
+
+      $fflight = Flight::where('user_id', $user->id)
+         ->where('route_code', 'PF')
+         ->whereNotIn('id', $flownFlightIds)
+         ->orderByDesc('created_at')
+         ->first();
+
+      if (!$fflight) {
+         $fflight = Flight::create([
             'airline_id'     => $user->airline_id,
             'flight_number'  => $user->id,
             'flight_type'    => 'E',
@@ -228,8 +246,8 @@ class DS_FreeFlightController extends Controller
             'days'           => null,
             'active'         => 0,
             'visible'        => 0,
-         ]
-      );
+         ]);
+      }
 
       return view('DSpecial::freeflights.index', [
          'aircraft'     => $aircraft,
@@ -283,10 +301,17 @@ class DS_FreeFlightController extends Controller
       // Update personal flight
       $dist = DS_CalculateDistance($orig->icao, $dest->icao);
 
+      // GSG-Fix: Den gewählten Entwurf nur überschreiben, solange er noch NICHT
+      // geflogen wurde. Hat er bereits einen PIREP, würde Überschreiben den
+      // Vorflug verfälschen → stattdessen einen NEUEN Flight-Datensatz anlegen
+      // (eigene flight_id pro Freiflug).
       $freeflight = Flight::where('id', $request->ff_id)->first();
+      if ($freeflight && Pirep::where('flight_id', $freeflight->id)->exists()) {
+         $freeflight = null;
+      }
       if (!$freeflight) {
-         flash()->error('Flight not found. Free Flight NOT Saved');
-         return redirect(route('DSpecial.freeflight'));
+         $freeflight = new Flight();
+         $freeflight->user_id = $request->user_id;
       }
 
       $freeflight->airline_id = $request->ff_airlineid;
@@ -316,15 +341,13 @@ class DS_FreeFlightController extends Controller
 
       $freeflight->save();
 
-      // Bid
-      Bid::firstOrCreate(
+      // Bid gegen den (ggf. neu angelegten) Freiflug — eigene flight_id
+      Bid::updateOrCreate(
          [
             'user_id'   => $request->user_id,
-            'flight_id' => $request->ff_id,
+            'flight_id' => $freeflight->id,
          ],
          [
-            'user_id'     => $request->user_id,
-            'flight_id'   => $request->ff_id,
             'aircraft_id' => !empty($request->ff_aircraft) ? $request->ff_aircraft : null,
          ]
       );
