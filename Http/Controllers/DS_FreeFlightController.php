@@ -11,6 +11,7 @@ use App\Models\Enums\AircraftStatus;
 use App\Models\Enums\FlightType;
 use App\Models\Flight;
 use App\Models\Pirep;
+use App\Models\SimBrief;
 use App\Models\Subfleet;
 use App\Models\User;
 use App\Services\AirportService;
@@ -229,9 +230,19 @@ class DS_FreeFlightController extends Controller
          ? collect()
          : Pirep::whereIn('flight_id', $pfFlights->pluck('id'))->pluck('flight_id');
 
-      // Erster noch NICHT geflogener Entwurf = editierbare Vorlage; PF-Sätze
-      // mit PIREP sind „verbraucht" und dürfen nicht überschrieben werden.
-      $fflight = $pfFlights->first(fn ($f) => !$flownIds->contains($f->id));
+      // Entwürfe, die schon eine (un-geflogene) OFP haben, sind ebenfalls
+      // „belegt": die OFP hängt an der flight_id. Würden wir sie überschreiben,
+      // zeigte die OFP plötzlich einen anderen Flug. → eigene flight_id schon
+      // ab OFP-Erstellung, nicht erst nach dem Fliegen. (SimBrief.flight_id wird
+      // beim PIREP-Filen genullt, daher trifft das nur aktive OFPs.)
+      $ofpIds = $pfFlights->isEmpty()
+         ? collect()
+         : SimBrief::whereIn('flight_id', $pfFlights->pluck('id'))->pluck('flight_id');
+
+      // Erster Entwurf OHNE PIREP und OHNE OFP = editierbare Vorlage.
+      $fflight = $pfFlights->first(
+         fn ($f) => !$flownIds->contains($f->id) && !$ofpIds->contains($f->id)
+      );
 
       if (!$fflight) {
          $fflight = Flight::create([
@@ -305,11 +316,16 @@ class DS_FreeFlightController extends Controller
       $dist = DS_CalculateDistance($orig->icao, $dest->icao);
 
       // GSG-Fix: Den gewählten Entwurf nur überschreiben, solange er noch NICHT
-      // geflogen wurde. Hat er bereits einen PIREP, würde Überschreiben den
-      // Vorflug verfälschen → stattdessen einen NEUEN Flight-Datensatz anlegen
-      // (eigene flight_id pro Freiflug).
+      // belegt ist. Hat er bereits einen PIREP (geflogen) ODER eine aktive OFP,
+      // würde Überschreiben den Vor-/OFP-Flug verfälschen → stattdessen einen
+      // NEUEN Flight-Datensatz anlegen (eigene flight_id schon ab OFP, nicht
+      // erst nach dem Fliegen — so kann man zwei Freiflüge hintereinander mit
+      // verschiedenem Flugzeug bauen, ohne dazwischen zu fliegen).
       $freeflight = Flight::where('id', $request->ff_id)->first();
-      if ($freeflight && Pirep::where('flight_id', $freeflight->id)->exists()) {
+      if ($freeflight && (
+         Pirep::where('flight_id', $freeflight->id)->exists()
+         || SimBrief::where('flight_id', $freeflight->id)->exists()
+      )) {
          $freeflight = null;
       }
       if (!$freeflight) {
