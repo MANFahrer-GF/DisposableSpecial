@@ -89,9 +89,18 @@ class DS_CronServices
         // PF-Flüge MIT PIREP sind geflogen → bleiben.
         $flownIds = Pirep::whereNotNull('flight_id')->distinct()->pluck('flight_id');
 
+        // PF-Flüge mit noch AKTIVER (un-geflogener) OFP NICHT anfassen: die OFP
+        // referenziert die flight_id. Würden wir den Flug löschen, bliebe eine
+        // verwaiste OFP zurück (deren flight_id ins Leere zeigt → kaputte
+        // PaxStudio-Ansicht). Greift praktisch nur, falls simbrief.expire_hours
+        // > $days gesetzt ist — sonst hat DeleteExpiredSimBrief die OFP längst
+        // geräumt. Macht den Cleanup von dieser Einstellung unabhängig.
+        $ofpFlightIds = SimBrief::whereNull('pirep_id')->whereNotNull('flight_id')->pluck('flight_id');
+
         $orphanIds = Flight::where('route_code', 'PF')
             ->where('updated_at', '<', $cutoff)
             ->whereNotIn('id', $flownIds)
+            ->whereNotIn('id', $ofpFlightIds)
             ->pluck('id');
 
         if ($orphanIds->isNotEmpty()) {
