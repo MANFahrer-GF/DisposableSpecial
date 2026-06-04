@@ -71,6 +71,36 @@ class DS_CronServices
         }
     }
 
+    // Cleanup orphaned Free Flights ("Leichen": booked/drafted but never flown).
+    // GSG-Fix: Seit dem eigene-flight_id-pro-Freiflug-Fix können verwaiste
+    // PF-Datensätze entstehen (gebucht/Entwurf, aber nie geflogen). Wir löschen
+    // PF-Flüge OHNE PIREP, die seit > $days Tagen nicht mehr angefasst wurden,
+    // inkl. ihrer Bids. Verwaiste OFPs werden von DeleteExpiredSimBrief geräumt.
+    // $days <= 0 deaktiviert (Default 7 — der Stale-Schutz bewahrt frisch
+    // Gebuchtes vor versehentlichem Löschen).
+    public function CleanupOrphanFreeFlights($days = 7)
+    {
+        if ($days <= 0) {
+            return;
+        }
+
+        $cutoff = Carbon::now()->subDays($days);
+
+        // PF-Flüge MIT PIREP sind geflogen → bleiben.
+        $flownIds = Pirep::whereNotNull('flight_id')->distinct()->pluck('flight_id');
+
+        $orphanIds = Flight::where('route_code', 'PF')
+            ->where('updated_at', '<', $cutoff)
+            ->whereNotIn('id', $flownIds)
+            ->pluck('id');
+
+        if ($orphanIds->isNotEmpty()) {
+            Bid::whereIn('flight_id', $orphanIds)->delete();
+            $deleted = Flight::whereIn('id', $orphanIds)->delete();
+            Log::info('Disposable Special | Cleaned up '.$deleted.' orphaned Free Flights (no PIREP, stale > '.$days.'d) and their bids');
+        }
+    }
+
     // Release Stuck Aircraft ("in use" or "in air" without an active pirep)
     public function ReleaseStuckAircraft()
     {

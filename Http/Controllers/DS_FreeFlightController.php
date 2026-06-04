@@ -216,19 +216,22 @@ class DS_FreeFlightController extends Controller
       // geflogenen Freiflug-Entwurf (PF, ohne PIREP) als editierbare Vorlage;
       // sobald der letzte Freiflug geflogen ist (hat einen PIREP), entsteht
       // beim nächsten Mal automatisch ein NEUER Datensatz mit eigener flight_id.
-      // flight_ids, die dieser Pilot bereits geflogen hat (= haben einen PIREP).
-      // Solche PF-Sätze sind „verbraucht" und dürfen nicht überschrieben werden.
-      // (Flight hat keine pireps()-Relation → manueller Lookup über Pirep.)
-      $flownFlightIds = Pirep::where('user_id', $user->id)
-         ->whereNotNull('flight_id')
-         ->pluck('flight_id')
-         ->all();
-
-      $fflight = Flight::where('user_id', $user->id)
+      // PF-Entwürfe dieses Piloten (kleine Menge). Den PIREP-Check NUR über
+      // diese wenigen IDs laufen lassen (statt alle PIREPs des Piloten zu
+      // plucken) → skaliert auch bei Vielfliegern. (Flight hat keine
+      // pireps()-Relation, daher manueller Lookup.)
+      $pfFlights = Flight::where('user_id', $user->id)
          ->where('route_code', 'PF')
-         ->whereNotIn('id', $flownFlightIds)
          ->orderByDesc('created_at')
-         ->first();
+         ->get();
+
+      $flownIds = $pfFlights->isEmpty()
+         ? collect()
+         : Pirep::whereIn('flight_id', $pfFlights->pluck('id'))->pluck('flight_id');
+
+      // Erster noch NICHT geflogener Entwurf = editierbare Vorlage; PF-Sätze
+      // mit PIREP sind „verbraucht" und dürfen nicht überschrieben werden.
+      $fflight = $pfFlights->first(fn ($f) => !$flownIds->contains($f->id));
 
       if (!$fflight) {
          $fflight = Flight::create([

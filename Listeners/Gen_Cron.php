@@ -82,6 +82,7 @@ class Gen_Cron extends Listener
         $CronSVC->DeleteOldSimBrief(DS_Setting('dspecial.old_simbrief_ofp', 0));
         $CronSVC->DeleteNonFlownMembers(DS_Setting('dspecial.delete_nonflown_members', 0));
         $CronSVC->RebaseParkedAircraft(DS_Setting('dspecial.rebase_parked_aircraft', 0));
+        $CronSVC->CleanupOrphanFreeFlights(7); // GSG: verwaiste Freiflüge (kein PIREP) nach 7 Tagen räumen
     }
 
     // Cron Weekly
